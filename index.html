@@ -27,11 +27,11 @@
   }
   .header { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
   h3 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
-  .subtitle { color: var(--dim); font-size: 14px; margin: 6px 0 24px; max-width: 66ch; }
+  .subtitle { color: var(--dim); font-size: 14px; margin: 6px 0 24px; max-width: 66ch; display: none; }
   .subtitle code { background: var(--panel); border: 1px solid var(--line); padding: 1px 6px; border-radius: 6px; font-size: 13px; color: var(--fg); }
 
   .controls {
-    display: grid;
+    display: none;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 12px;
     margin-bottom: 20px;
@@ -84,7 +84,7 @@
   }
 
   .section-label {
-    display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600;
+    display: none; align-items: center; gap: 8px; font-size: 12px; font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 30px 0 10px;
   }
   .section-label svg { stroke: var(--dim); }
@@ -112,7 +112,7 @@
   .btn-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
 
   .gsm-note {
-    font-size: 13px; color: var(--dim); margin: 16px 0; max-width: 66ch;
+    font-size: 13px; color: var(--dim); margin: 16px 0; max-width: 66ch; display: none;
   }
 
   #gsmStatus {
@@ -149,6 +149,8 @@
     background: var(--fg); color: var(--bg); border: none;
     font-size: 11.5px; font-weight: 700; padding: 5px 14px; border-radius: 999px; cursor: pointer;
   }
+
+     -webkit-tap-highlight-color: rgba(255, 255, 255, 0);
 </style>
 </head>
 <body>
@@ -201,7 +203,7 @@
 <div id="headerDump"></div>
 
 <div class="btn-row" id="actionRow" style="display:none">
-  <button class="btn" id="gsmBtn">Decode as GSM 06.10</button>
+  <button class="btn" id="gsmBtn">Decode</button>
   <button class="btn secondary" id="gsmScanBtn">Scan header alignment</button>
 </div>
 <p class="gsm-note">
@@ -420,7 +422,7 @@ async function handleFile(file) {
   gsmScanResults.innerHTML = '';
   actionRow.style.display = 'flex';
   gsmBtn.disabled = false;
-  gsmBtn.textContent = 'Decode as GSM 06.10';
+  gsmBtn.textContent = 'Decode';
   filenamePill.style.display = 'inline-flex';
   filenameText.textContent = file.name;
 
@@ -430,12 +432,12 @@ async function handleFile(file) {
   const sampleRate = Math.max(1000, parseInt(document.getElementById('sampleRate').value) || 8000);
 
   headerDump.textContent = hexDump(bytes, 64);
-  headerDump.style.display = 'block';
-  headerLabel.style.display = 'flex';
+  headerDump.style.display = 'none';
+  headerLabel.style.display = 'none';
 
   const payload = bytes.slice(headerSize);
   state = { file, payload, sampleRate };
-  log(`File size: ${bytes.length} bytes, header: ${headerSize} bytes, payload: ${payload.length} bytes`);
+  // The sizing log string was removed from here.
 }
 
 function renderResult(name, samples, sampleRate, spec, extra) {
@@ -585,7 +587,7 @@ gsmBtn.addEventListener('click', async () => {
     log(`Done: ${samples.length} samples @ ${sampleRate}Hz, score ${spec.score.toFixed(1)}`);
     if (truncated) log('⚠ Decoded audio is shorter than the input implies — frames were likely dropped.', 'warn');
 
-    gsmBtn.textContent = 'Re-decode as GSM 06.10';
+    gsmBtn.textContent = 'Re-decode';
     gsmBtn.disabled = false;
   } catch (err) {
     log(`Failed: ${explainFfmpegError(err)}`, 'warn');
