@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Must be the first script: enables SharedArrayBuffer (required by ffmpeg.wasm)
+     on static hosts like GitHub Pages that can't set COOP/COEP headers directly.
+     Requires coi-serviceworker.js to be hosted alongside this HTML file. -->
+<script src="coi-serviceworker.js"></script>
+<title>AU Extractor — Codec Candidate Analyzer</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #12151c;
+    --panel-2: #171b24;
+    --border: #242938;
+    --text: #e6e9f0;
+    --text-dim: #8890a4;
+    --accent: #7c9eff;
+    --accent-2: #5eead4;
+    --ok: #5eead4;
+    --warn: #fbbf24;
+    --err: #fb7185;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background:
+      radial-gradient(circle at 15% 0%, rgba(124,158,255,0.08), transparent 40%),
+      radial-gradient(circle at 85% 20%, rgba(94,234,212,0.06), transparent 40%),
+      var(--bg);
+    color: var(--text);
+    padding: 40px 24px;
+    max-width: 900px;
+    margin: 0 auto;
+    line-height: 1.5;
+  }
+  .header { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+  h3 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+  .subtitle { color: var(--text-dim); font-size: 14px; margin: 6px 0 20px; max-width: 68ch; }
+  .subtitle code { background: var(--panel-2); border: 1px solid var(--border); padding: 1px 6px; border-radius: 5px; font-size: 13px; color: var(--accent-2); }
+
+  .callout {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--warn);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 24px;
+  }
+  .callout b { color: var(--text); }
+
+  .controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-bottom: 18px;
+  }
+  .control label {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin-bottom: 5px;
+  }
+  .control input, .control select {
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: 'SF Mono', Consolas, monospace;
+  }
+
+  .dropzone {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    border: 1.5px dashed var(--border);
+    border-radius: var(--radius);
+    background: var(--panel);
+    padding: 30px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease;
+  }
+  .dropzone:hover, .dropzone.drag { border-color: var(--accent); background: var(--panel-2); }
+  .dropzone svg { display: block; margin: 0 auto 10px; width: 30px; height: 30px; stroke: var(--accent); }
+  .dropzone .dz-title { font-size: 15px; font-weight: 500; }
+  .dropzone .dz-sub { font-size: 13px; color: var(--text-dim); margin-top: 4px; }
+  #fileInput { display: none; }
+
+  .filename-pill {
+    display: none; align-items: center; gap: 8px; margin-top: 12px; padding: 7px 14px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px;
+    font-size: 13px; color: var(--accent-2); width: fit-content; margin-left: auto; margin-right: auto;
+  }
+
+  .section-label {
+    display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin: 28px 0 10px;
+  }
+  .section-label svg { stroke: var(--text-dim); }
+
+  #headerDump {
+    font-family: 'SF Mono', Consolas, monospace; font-size: 11.5px; background: #05060a;
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;
+    overflow-x: auto; white-space: pre; color: var(--text-dim); display: none;
+  }
+
+  .candidate {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin-bottom: 12px;
+  }
+  .candidate.best { border-color: var(--accent-2); box-shadow: 0 0 0 1px var(--accent-2), 0 12px 30px -12px rgba(94,234,212,0.25); }
+
+  .cand-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .cand-name { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .cand-badge {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
+    padding: 2px 8px; border-radius: 999px; background: var(--accent-2); color: #0b0d12;
+  }
+  .score-wrap { display: flex; align-items: center; gap: 8px; }
+  .score-bar { width: 90px; height: 6px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+  .score-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .score-num { font-family: 'SF Mono', Consolas, monospace; font-size: 13px; font-weight: 600; min-width: 34px; text-align: right; }
+
+  .cand-meta { font-size: 12px; color: var(--text-dim); margin-top: 6px; font-family: 'SF Mono', Consolas, monospace; }
+  canvas.waveform { width: 100%; height: 48px; display: block; margin-top: 10px; border-radius: 6px; background: #05060a; border: 1px solid var(--border); }
+
+  .cand-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  audio { height: 32px; }
+  .dl-btn {
+    display: inline-flex; align-items: center; gap: 6px; background: var(--panel-2);
+    border: 1px solid var(--border); color: var(--accent-2); text-decoration: none;
+    font-size: 12.5px; font-weight: 600; padding: 6px 12px; border-radius: 8px;
+  }
+  .dl-btn:hover { border-color: var(--accent-2); }
+
+  .gsm-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin-bottom: 18px;
+    display: none;
+  }
+  .gsm-box .gsm-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .gsm-box .gsm-sub { font-size: 12.5px; color: var(--text-dim); margin-bottom: 12px; }
+  .gsm-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: linear-gradient(135deg, var(--accent), #6366f1);
+    color: #0b0d12; font-weight: 600; font-size: 13.5px; border: none;
+    padding: 9px 18px; border-radius: 9px; cursor: pointer;
+  }
+  .gsm-btn:disabled { opacity: 0.6; cursor: default; }
+  .gsm-status { font-size: 12.5px; color: var(--text-dim); margin-top: 10px; font-family: 'SF Mono', Consolas, monospace; white-space: pre-wrap; }
+
+  .scan-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 8px 10px; border-radius: 8px; margin-top: 6px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px;
+  }
+  .scan-row.best { border-color: var(--accent-2); }
+  .scan-row .offset { color: var(--text); font-weight: 600; }
+  .scan-row .scan-score { display: flex; align-items: center; gap: 8px; }
+  .scan-row .score-bar { width: 70px; height: 5px; background: var(--panel); border-radius: 4px; overflow: hidden; }
+  .scan-row .score-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .scan-apply-btn {
+    background: transparent; border: 1px solid var(--border); color: var(--accent-2);
+    font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+  }
+  .scan-apply-btn:hover { border-color: var(--accent-2); }
+
+  #log { font-family: 'SF Mono', Consolas, monospace; font-size: 12.5px; background: #05060a;
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;
+    max-height: 220px; overflow: auto; white-space: pre-wrap; color: var(--text-dim); display: none; }
+  #log .ok { color: var(--ok); }
+  #log .warn { color: var(--warn); }
+  #log .err { color: var(--err); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="url(#g1)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+    <defs><linearGradient id="g1" x1="0" y1="0" x2="24" y2="24">
+      <stop offset="0%" stop-color="#7c9eff"/><stop offset="100%" stop-color="#5eead4"/>
+    </linearGradient></defs>
+    <path d="M4 15v-3a8 8 0 0116 0v3"/>
+    <path d="M4 15a2 2 0 002 2h1a1 1 0 001-1v-3a1 1 0 00-1-1H4v3z"/>
+    <path d="M20 15a2 2 0 01-2 2h-1a1 1 0 01-1-1v-3a1 1 0 011-1h3v3z"/>
+  </svg>
+  <h3>AU Extractor — Codec Candidate Analyzer</h3>
+</div>
+<p class="subtitle">
+  For proprietary <code>.au</code>-style containers with no known codec tag (e.g. CloudPets-style audio blobs).
+  Instead of committing to one decoder, this tries several candidate PCM interpretations of the same payload bytes
+  and ranks each by how <em>speech-like</em> its spectrum looks — dominant energy in the ~250–3400&nbsp;Hz voice
+  band and non-trivial frame-to-frame activity, rather than a flat/near-DC spectrum.
+</p>
+
+<div class="callout">
+  <b>Why this exists:</b> a raw decode can succeed technically (valid sample values, no crashes) while still being
+  the <em>wrong</em> codec — the audio it produces is just noise shaped like audio. Example from a real session:
+  a GSM 6.10 decode of a payload came back with top spectral components at <b>1–18&nbsp;Hz</b> — nowhere near the
+  human voice range — a strong sign that GSM was the wrong codec for that stream, even though the decode itself
+  didn't error out. Scoring every candidate this way catches that automatically instead of eyeballing FFT output.
+</div>
+
+<div class="controls">
+  <div class="control">
+    <label>Header size (bytes)</label>
+    <input type="number" id="headerSize" value="32" min="0">
+  </div>
+  <div class="control">
+    <label>Sample rate (Hz)</label>
+    <input type="number" id="sampleRate" value="8000" min="1000" step="100">
+  </div>
+  <div class="control">
+    <label>MS-ADPCM block align</label>
+    <input type="number" id="blockAlign" value="256" min="8">
+  </div>
+  <div class="control">
+    <label>Analysis window (samples)</label>
+    <select id="fftSize">
+      <option value="16384">16384</option>
+      <option value="32768" selected>32768</option>
+      <option value="65536">65536</option>
+    </select>
+  </div>
+</div>
+
+<label class="dropzone" id="dropzone" for="fileInput">
+  <svg viewBox="0 0 24 24" fill="none" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 18a4 4 0 01-1-7.87A5.5 5.5 0 0116.9 8.05 4.5 4.5 0 0117 17H7z"/>
+    <path d="M12 12v6M9.5 14.5L12 12l2.5 2.5"/>
+  </svg>
+  <div class="dz-title">Drop a file or click to browse</div>
+  <div class="dz-sub">.au / raw compressed audio payloads</div>
+  <div class="filename-pill" id="filenamePill">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/>
+    </svg>
+    <span id="filenameText"></span>
+  </div>
+</label>
+<input type="file" id="fileInput">
+
+<div class="section-label" id="headerLabel" style="display:none">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/>
+  </svg>
+  Header dump (first 64 bytes)
+</div>
+<div id="headerDump"></div>
+
+<div class="section-label" id="logLabel" style="display:none">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-3"/><path d="M18 2l4 4-10 10H8v-4z"/>
+  </svg>
+  Decode log
+</div>
+<div id="log"></div>
+
+<div class="gsm-box" id="gsmBox">
+  <div class="gsm-title">GSM 06.10 (real ffmpeg, via ffmpeg.wasm)</div>
+  <div class="gsm-sub">
+    Runs the actual command <code>ffmpeg -f gsm -ar &lt;rate&gt; -ac 1 -i payload.bin out.wav</code> in-browser —
+    a hand-written GSM 06.10 decoder is easy to get subtly wrong (RPE-LTP math + bit-packing), so this uses the
+    real reference decoder instead of reimplementing it. First click downloads the ffmpeg core (~25&nbsp;MB, cached after that).
+  </div>
+  <div style="display:flex; gap:10px; flex-wrap:wrap;">
+    <button class="gsm-btn" id="gsmBtn">Decode as GSM 06.10</button>
+    <button class="gsm-btn" id="gsmScanBtn" style="background:var(--panel-2); color:var(--text); border:1px solid var(--border);">Scan header alignment</button>
+  </div>
+  <div class="gsm-sub" style="margin-top:10px; margin-bottom:0;">
+    GSM frames are stateful — each 33-byte frame decodes using the previous frame's state, so if the header size
+    guess is off by even a few bytes, every frame decodes from a corrupted mid-frame position and you get exactly
+    the "mostly noise, occasionally speech-like" result. This tries a spread of header offsets through the real
+    decoder and scores each, so you can find the byte-exact boundary instead of guessing.
+  </div>
+  <div class="gsm-status" id="gsmStatus"></div>
+  <div id="gsmScanResults"></div>
+</div>
+
+<div class="section-label" id="candLabel" style="display:none">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 15v-3a8 8 0 0116 0v3"/>
+  </svg>
+  Candidate decodes, ranked by speech-likeness
+</div>
+<div id="candidates"></div>
+
+<script>
+// ============================== helpers ==============================
+const logEl = document.getElementById('log');
+const logLabel = document.getElementById('logLabel');
+function log(msg, cls) {
+  logLabel.style.display = 'flex';
+  logEl.style.display = 'block';
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  logEl.appendChild(line);
+}
+
+function hexDump(bytes, n) {
+  n = Math.min(n, bytes.length);
+  let out = '';
+  for (let i = 0; i < n; i += 16) {
+    const chunk = bytes.slice(i, Math.min(i + 16, n));
+    const hex = Array.from(chunk).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    const ascii = Array.from(chunk).map(b => (b >= 32 && b < 127) ? String.fromCharCode(b) : '.').join('');
+    out += i.toString(16).padStart(6, '0') + '  ' + hex.padEnd(16 * 3 - 1, ' ') + '  ' + ascii + '\n';
+  }
+  return out;
+}
+
+// ---- WAV writer (mono, 16-bit PCM) ----
+function makeWav(int16Samples, sampleRate) {
+  const numSamples = int16Samples.length;
+  const byteRate = sampleRate * 2;
+  const buffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(buffer);
+  function writeStr(off, s) { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); }
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);   // PCM
+  view.setUint16(22, 1, true);   // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, 2, true);   // block align
+  view.setUint16(34, 16, true);  // bits per sample
+  writeStr(36, 'data');
+  view.setUint32(40, numSamples * 2, true);
+  for (let i = 0; i < numSamples; i++) view.setInt16(44 + i * 2, int16Samples[i], true);
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+// ============================== codecs ==============================
+// mu-law -> linear PCM16 (ITU-T G.711)
+function ulawDecode(bytes) {
+  const BIAS = 0x84;
+  const out = new Int16Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) {
+    let uval = ~bytes[i] & 0xFF;
+    let t = ((uval & 0x0F) << 3) + BIAS;
+    t <<= (uval & 0x70) >> 4;
+    out[i] = (uval & 0x80) ? (BIAS - t) : (t - BIAS);
+  }
+  return out;
+}
+
+// A-law -> linear PCM16 (ITU-T G.711)
+function alawDecode(bytes) {
+  const out = new Int16Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) {
+    let aval = bytes[i] ^ 0x55;
+    let t = (aval & 0x0F) << 4;
+    const seg = (aval & 0x70) >> 4;
+    if (seg === 0) t += 8;
+    else if (seg === 1) t += 0x108;
+    else { t += 0x108; t <<= (seg - 1); }
+    out[i] = (aval & 0x80) ? t : -t;
+  }
+  return out;
+}
+
+function pcm16le(bytes) {
+  const n = bytes.length >> 1;
+  const out = new Int16Array(n);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+  for (let i = 0; i < n; i++) out[i] = dv.getInt16(i * 2, true);
+  return out;
+}
+
+function pcm16be(bytes) {
+  const n = bytes.length >> 1;
+  const out = new Int16Array(n);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+  for (let i = 0; i < n; i++) out[i] = dv.getInt16(i * 2, false);
+  return out;
+}
+
+function pcm8u(bytes) {
+  const out = new Int16Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) out[i] = (bytes[i] - 128) << 8;
+  return out;
+}
+
+// IMA ADPCM, naive continuous nibble stream (no per-block header re-sync).
+// Approximate candidate — real IMA streams are usually block-structured, but
+// this is useful as a coarse "is it even ADPCM-shaped" probe.
+const IMA_INDEX_TABLE = [-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8];
+const IMA_STEP_TABLE = [7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,27086,29794,32767];
+function imaAdpcmDecode(bytes) {
+  const out = new Int16Array(bytes.length * 2);
+  let predictor = 0, index = 0;
+  let oi = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    for (const nibble of [bytes[i] & 0x0F, (bytes[i] >> 4) & 0x0F]) {
+      const step = IMA_STEP_TABLE[index];
+      let diff = step >> 3;
+      if (nibble & 4) diff += step;
+      if (nibble & 2) diff += step >> 1;
+      if (nibble & 1) diff += step >> 2;
+      if (nibble & 8) predictor -= diff; else predictor += diff;
+      predictor = Math.max(-32768, Math.min(32767, predictor));
+      index += IMA_INDEX_TABLE[nibble];
+      index = Math.max(0, Math.min(88, index));
+      out[oi++] = predictor;
+    }
+  }
+  return out;
+}
+
+// MS ADPCM (mono), block-structured, per Microsoft ADPCM spec.
+const MS_ADAPT_TABLE = [230,230,230,230,307,409,512,614,768,614,512,409,307,230,230,230];
+const MS_COEFF1 = [256,512,0,192,240,460,392];
+const MS_COEFF2 = [0,-256,0,64,0,-208,-232];
+function msAdpcmDecode(bytes, blockAlign) {
+  const out = [];
+  let pos = 0;
+  while (pos + 7 <= bytes.length) {
+    const blockEnd = Math.min(pos + blockAlign, bytes.length);
+    if (blockEnd - pos < 7) break;
+    const dv = new DataView(bytes.buffer, bytes.byteOffset + pos, blockEnd - pos);
+    const predIdx = dv.getUint8(0);
+    if (predIdx > 6) { pos += blockAlign; continue; } // not a plausible block, skip
+    let delta = dv.getInt16(1, true);
+    let samp1 = dv.getInt16(3, true);
+    let samp2 = dv.getInt16(5, true);
+    const coeff1 = MS_COEFF1[predIdx], coeff2 = MS_COEFF2[predIdx];
+    out.push(samp2, samp1);
+    let bp = 7;
+    while (bp < dv.byteLength) {
+      const byte = dv.getUint8(bp++);
+      for (const nibble of [(byte >> 4) & 0x0F, byte & 0x0F]) {
+        let pred = ((samp1 * coeff1) + (samp2 * coeff2)) >> 8;
+        const signed = (nibble & 0x08) ? (nibble - 16) : nibble;
+        pred += signed * delta;
+        pred = Math.max(-32768, Math.min(32767, pred));
+        samp2 = samp1;
+        samp1 = pred;
+        out.push(pred);
+        delta = (delta * MS_ADAPT_TABLE[nibble]) >> 8;
+        if (delta < 16) delta = 16;
+      }
+    }
+    pos += blockAlign;
+  }
+  return Int16Array.from(out);
+}
+
+// ============================== spectral scoring ==============================
+// Minimal iterative radix-2 Cooley-Tukey FFT (in-place, real+imag arrays).
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let curWr = 1, curWi = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ur = re[i + k], ui = im[i + k];
+        const vr = re[i + k + len/2] * curWr - im[i + k + len/2] * curWi;
+        const vi = re[i + k + len/2] * curWi + im[i + k + len/2] * curWr;
+        re[i + k] = ur + vr; im[i + k] = ui + vi;
+        re[i + k + len/2] = ur - vr; im[i + k + len/2] = ui - vi;
+        const nwr = curWr * wr - curWi * wi;
+        const nwi = curWr * wi + curWi * wr;
+        curWr = nwr; curWi = nwi;
+      }
+    }
+  }
+}
+
+function nextPow2(n) { let p = 1; while (p < n) p <<= 1; return p; }
+
+function analyzeSpectrum(int16Samples, sampleRate, windowSize) {
+  const n = Math.min(nextPow2(Math.min(windowSize, int16Samples.length)), windowSize);
+  const N = nextPow2(Math.min(int16Samples.length, windowSize));
+  if (N < 64) return null;
+
+  const re = new Float64Array(N);
+  const im = new Float64Array(N);
+  for (let i = 0; i < N; i++) re[i] = int16Samples[i] || 0;
+  fft(re, im);
+
+  const half = N / 2;
+  const mags = new Float64Array(half);
+  for (let i = 0; i < half; i++) mags[i] = Math.hypot(re[i], im[i]);
+
+  // top-10 magnitude bins
+  const idxs = Array.from({length: half}, (_, i) => i);
+  idxs.sort((a, b) => mags[b] - mags[a]);
+  const top = idxs.slice(0, 10).sort((a, b) => a - b);
+  const topFreqs = top.map(i => (i * sampleRate) / N);
+
+  // RMS + 100ms-frame activity ratio (matches the reference analysis script)
+  let sumSq = 0;
+  const total = Math.min(int16Samples.length, windowSize);
+  for (let i = 0; i < total; i++) sumSq += int16Samples[i] * int16Samples[i];
+  const rms = Math.sqrt(sumSq / total);
+
+  const frameSize = Math.max(1, Math.floor(sampleRate / 10));
+  let activeFrames = 0, totalFrames = 0;
+  for (let i = 0; i + frameSize <= total; i += frameSize) {
+    let s = 0;
+    for (let j = 0; j < frameSize; j++) s += int16Samples[i + j] * int16Samples[i + j];
+    const frms = Math.sqrt(s / frameSize);
+    if (frms > rms * 0.3) activeFrames++;
+    totalFrames++;
+  }
+  const activePct = totalFrames ? (100 * activeFrames / totalFrames) : 0;
+
+  // Speech-likeness scoring
+  const SPEECH_LO = 250, SPEECH_HI = 3400, DC_GUARD = 40;
+  const inBand = topFreqs.filter(f => f >= SPEECH_LO && f <= SPEECH_HI).length;
+  const nearDc = topFreqs.filter(f => f < DC_GUARD).length;
+  const speechBandFraction = inBand / topFreqs.length;
+  const dcFraction = nearDc / topFreqs.length;
+
+  let score = 70 * speechBandFraction + 30 * (activePct / 100);
+  score -= 60 * dcFraction; // heavy penalty if dominant energy clusters near DC (a red flag, not speech)
+  score = Math.max(0, Math.min(100, score));
+
+  return { topFreqs, rms, activePct, score, dcFraction };
+}
+
+// ============================== UI wiring ==============================
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const filenamePill = document.getElementById('filenamePill');
+const filenameText = document.getElementById('filenameText');
+const headerDump = document.getElementById('headerDump');
+const headerLabel = document.getElementById('headerLabel');
+const candLabel = document.getElementById('candLabel');
+const candidatesEl = document.getElementById('candidates');
+const gsmBox = document.getElementById('gsmBox');
+const gsmBtn = document.getElementById('gsmBtn');
+const gsmScanBtn = document.getElementById('gsmScanBtn');
+const gsmScanResults = document.getElementById('gsmScanResults');
+const gsmStatus = document.getElementById('gsmStatus');
+
+// Module-level state for the currently loaded file, so the async GSM/ffmpeg
+// step (triggered later by a button click) can reuse the same payload/settings.
+let state = { file: null, payload: null, sampleRate: 8000, candidates: [] };
+let ffmpegInstance = null;
+
+['dragenter', 'dragover'].forEach(evt => dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(evt => dropzone.addEventListener(evt, e => { e.preventDefault(); dropzone.classList.remove('drag'); }));
+dropzone.addEventListener('drop', e => {
+  const file = e.dataTransfer.files[0];
+  if (file) { fileInput.files = e.dataTransfer.files; handleFile(file); }
+});
+fileInput.addEventListener('change', e => { const f = e.target.files[0]; if (f) handleFile(f); });
+
+function waveformCanvas(int16Samples) {
+  const canvas = document.createElement('canvas');
+  canvas.className = 'waveform';
+  canvas.width = 800; canvas.height = 48;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#05060a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#5eead4';
+  ctx.beginPath();
+  const step = Math.max(1, Math.floor(int16Samples.length / canvas.width));
+  for (let x = 0; x < canvas.width; x++) {
+    const i = x * step;
+    let min = 32767, max = -32768;
+    for (let j = 0; j < step && i + j < int16Samples.length; j++) {
+      const v = int16Samples[i + j];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    const y1 = 24 - (max / 32768) * 22;
+    const y2 = 24 - (min / 32768) * 22;
+    ctx.moveTo(x, y1); ctx.lineTo(x, y2);
+  }
+  ctx.stroke();
+  return canvas;
+}
+
+// Minimal RIFF/WAVE parser: pulls sample rate + mono Int16 PCM samples out of
+// a WAV buffer (used to read ffmpeg.wasm's decoded output back into JS).
+function parseWav(buffer) {
+  const dv = new DataView(buffer);
+  if (dv.getUint32(0, false) !== 0x52494646) throw new Error('Not a RIFF file'); // "RIFF"
+  let pos = 12, fmt = null, dataOffset = -1, dataLen = 0;
+  while (pos + 8 <= dv.byteLength) {
+    const id = String.fromCharCode(dv.getUint8(pos), dv.getUint8(pos+1), dv.getUint8(pos+2), dv.getUint8(pos+3));
+    const size = dv.getUint32(pos + 4, true);
+    if (id === 'fmt ') {
+      fmt = {
+        channels: dv.getUint16(pos + 10, true),
+        sampleRate: dv.getUint32(pos + 12, true),
+        bitsPerSample: dv.getUint16(pos + 22, true),
+      };
+    } else if (id === 'data') {
+      dataOffset = pos + 8;
+      dataLen = size;
+    }
+    pos += 8 + size + (size % 2);
+  }
+  if (!fmt || dataOffset < 0) throw new Error('Missing fmt/data chunk');
+  const n = Math.floor(dataLen / 2 / fmt.channels);
+  const out = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = dv.getInt16(dataOffset + i * fmt.channels * 2, true); // first channel only
+  }
+  return { samples: out, sampleRate: fmt.sampleRate };
+}
+
+function renderCandidates() {
+  state.candidates.sort((a, b) => b.spec.score - a.spec.score);
+  candLabel.style.display = 'flex';
+  candidatesEl.innerHTML = '';
+
+  state.candidates.forEach((c, idx) => {
+    const div = document.createElement('div');
+    div.className = 'candidate' + (idx === 0 ? ' best' : '');
+
+    const scorePct = c.spec.score.toFixed(0);
+    const freqsStr = c.spec.topFreqs.map(f => f.toFixed(0) + 'Hz').join(', ');
+
+    div.innerHTML = `
+      <div class="cand-top">
+        <div class="cand-name">${c.name} ${idx === 0 ? '<span class="cand-badge">Most speech-like</span>' : ''}</div>
+        <div class="score-wrap">
+          <div class="score-bar"><div class="score-fill" style="width:${scorePct}%"></div></div>
+          <div class="score-num">${scorePct}</div>
+        </div>
+      </div>
+      <div class="cand-meta">
+        duration ${(c.samples.length / c.sampleRate).toFixed(2)}s · rms ${c.spec.rms.toFixed(0)} · active frames ${c.spec.activePct.toFixed(0)}%<br>
+        top freqs: ${freqsStr}
+      </div>
+    `;
+
+    const canvas = waveformCanvas(c.samples);
+    div.appendChild(canvas);
+
+    const actions = document.createElement('div');
+    actions.className = 'cand-actions';
+
+    const blob = makeWav(c.samples, c.sampleRate);
+    const url = URL.createObjectURL(blob);
+
+    const audio = document.createElement('audio');
+    audio.controls = true;
+    audio.src = url;
+    actions.appendChild(audio);
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.className = 'dl-btn';
+    const baseName = state.file ? state.file.name.replace(/\.[^.]+$/, '') : 'audio';
+    a.download = baseName + '_' + c.name.replace(/[^a-z0-9]+/gi, '_').toLowerCase() + '.wav';
+    a.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13m0 0l-4-4m4 4l4-4"/><path d="M4 20h16"/></svg> Download WAV`;
+    actions.appendChild(a);
+
+    div.appendChild(actions);
+    candidatesEl.appendChild(div);
+  });
+}
+
+async function handleFile(file) {
+  headerDump.textContent = '';
+  headerDump.style.display = 'none';
+  headerLabel.style.display = 'none';
+  logEl.innerHTML = ''; logEl.style.display = 'none'; logLabel.style.display = 'none';
+  candidatesEl.innerHTML = ''; candLabel.style.display = 'none';
+  gsmBox.style.display = 'block';
+  gsmStatus.textContent = '';
+  gsmScanResults.innerHTML = '';
+  gsmBtn.disabled = false;
+  gsmBtn.textContent = 'Decode as GSM 06.10';
+  filenamePill.style.display = 'inline-flex';
+  filenameText.textContent = file.name;
+
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+
+  const headerSize = Math.max(0, parseInt(document.getElementById('headerSize').value) || 0);
+  const sampleRate = Math.max(1000, parseInt(document.getElementById('sampleRate').value) || 8000);
+  const blockAlign = Math.max(8, parseInt(document.getElementById('blockAlign').value) || 256);
+  const fftSize = parseInt(document.getElementById('fftSize').value) || 32768;
+
+  headerDump.textContent = hexDump(bytes, 64);
+  headerDump.style.display = 'block';
+  headerLabel.style.display = 'flex';
+
+  const payload = bytes.slice(headerSize);
+  log(`File size: ${bytes.length} bytes, header: ${headerSize} bytes, payload: ${payload.length} bytes`, 'ok');
+  log(`Analyzing at ${sampleRate} Hz, MS-ADPCM block align ${blockAlign}, FFT window ${fftSize} samples`);
+
+  state = { file, payload, sampleRate, candidates: [] };
+
+  function tryCandidate(name, fn) {
+    try {
+      const samples = fn();
+      if (!samples || samples.length < 64) { log(`${name}: too short / empty, skipped`, 'warn'); return; }
+      const spec = analyzeSpectrum(samples, sampleRate, fftSize);
+      if (!spec) { log(`${name}: spectrum analysis failed`, 'warn'); return; }
+      state.candidates.push({ name, samples, sampleRate, spec });
+      log(`${name}: decoded ${samples.length} samples, score ${spec.score.toFixed(1)}`, 'ok');
+    } catch (err) {
+      log(`${name}: FAILED - ${err}`, 'err');
+    }
+  }
+
+  tryCandidate('Raw PCM16 (little-endian)', () => pcm16le(payload));
+  tryCandidate('Raw PCM16 (big-endian)', () => pcm16be(payload));
+  tryCandidate('Raw PCM8 (unsigned)', () => pcm8u(payload));
+  tryCandidate('μ-law (G.711)', () => ulawDecode(payload));
+  tryCandidate('A-law (G.711)', () => alawDecode(payload));
+  tryCandidate('IMA ADPCM (naive, no block resync)', () => imaAdpcmDecode(payload));
+  tryCandidate('MS ADPCM (block-structured)', () => msAdpcmDecode(payload, blockAlign));
+
+  renderCandidates();
+
+  if (!state.candidates.length) {
+    log('No candidate decodes produced usable output. Try adjusting header size / block align.', 'err');
+  }
+}
+
+// ---- GSM 06.10 via real ffmpeg (ffmpeg.wasm), mirroring:
+//   ffmpeg -f gsm -ar <rate> -ac 1 -i payload.bin out.wav
+const FFMPEG_LIB_URLS = [
+  'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js',
+  'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js',
+];
+const FFMPEG_CORE_URLS = [
+  'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+  'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+];
+
+function loadScriptOnce(url) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = url;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`Failed to load script: ${url}`));
+    document.head.appendChild(s);
+  });
+}
+
+// Loads the ffmpeg.wasm JS library itself (not the core/wasm binary), trying
+// multiple CDNs in order. Throws a clear error if the global never appears,
+// instead of failing later with a cryptic "FFmpeg is not defined".
+let ffmpegLibLoadPromise = null;
+function ensureFfmpegLib() {
+  if (window.FFmpeg) return Promise.resolve();
+  if (ffmpegLibLoadPromise) return ffmpegLibLoadPromise;
+
+  ffmpegLibLoadPromise = (async () => {
+    let lastErr = null;
+    for (const url of FFMPEG_LIB_URLS) {
+      try {
+        await loadScriptOnce(url);
+        if (window.FFmpeg) return;
+        lastErr = new Error(`Loaded ${url} but window.FFmpeg was not defined afterward`);
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    ffmpegLibLoadPromise = null; // allow retry on next call
+    throw new Error(
+      `Could not load the ffmpeg.wasm library from any CDN (tried ${FFMPEG_LIB_URLS.length} sources). ` +
+      `Last error: ${lastErr}. This usually means an ad-blocker/extension or network policy is blocking ` +
+      `unpkg.com and jsdelivr.net — try disabling blockers for this page, or check your network settings.`
+    );
+  })();
+  return ffmpegLibLoadPromise;
+}
+
+async function ensureFfmpeg(onLog) {
+  await ensureFfmpegLib();
+  if (!ffmpegInstance) {
+    const { createFFmpeg } = window.FFmpeg;
+    let lastErr = null;
+    for (const corePath of FFMPEG_CORE_URLS) {
+      try {
+        const inst = createFFmpeg({ log: false, corePath });
+        if (onLog) inst.setLogger(({ message }) => onLog(message));
+        await inst.load();
+        ffmpegInstance = inst;
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!ffmpegInstance) {
+      throw new Error(`Could not load the ffmpeg core/wasm binary from any CDN. Last error: ${lastErr}`);
+    }
+  }
+  return ffmpegInstance;
+}
+
+// Runs the real ffmpeg GSM decoder on a given byte buffer and returns the
+// decoded samples + a spectral score. Used both by the single "decode" button
+// and by the alignment scanner below (one call per candidate offset).
+async function runFfmpegGsm(payloadBytes, sampleRate, fftSize) {
+  const ff = await ensureFfmpeg();
+  ff.FS('writeFile', 'payload.bin', payloadBytes);
+  await ff.run('-f', 'gsm', '-ar', String(sampleRate), '-ac', '1', '-i', 'payload.bin', 'out.wav', '-y');
+  const outData = ff.FS('readFile', 'out.wav');
+  const parsed = parseWav(outData.buffer.slice(outData.byteOffset, outData.byteOffset + outData.byteLength));
+  const spec = analyzeSpectrum(parsed.samples, parsed.sampleRate, fftSize);
+  if (!spec) throw new Error('spectral analysis failed on ffmpeg output');
+  return { samples: parsed.samples, sampleRate: parsed.sampleRate, spec };
+}
+
+// Turns known cryptic errors (SharedArrayBuffer missing, etc.) into an
+// actionable message instead of a raw stack trace.
+function explainFfmpegError(err) {
+  const msg = String(err && err.message ? err.message : err);
+  if (msg.includes('SharedArrayBuffer')) {
+    return (
+      `${msg}\n\n` +
+      `This means the page isn't cross-origin-isolated yet, which ffmpeg.wasm ` +
+      `needs. coi-serviceworker.js should fix this automatically on reload — ` +
+      `make sure coi-serviceworker.js is hosted in the SAME folder as this HTML ` +
+      `file, then do a hard refresh (Ctrl/Cmd+Shift+R) once. Check the browser ` +
+      `console for "COOP/COEP Service Worker registered" — if you don't see ` +
+      `that line, the service worker isn't loading (wrong path, or the file ` +
+      `is 404ing).`
+    );
+  }
+  return msg;
+}
+
+gsmBtn.addEventListener('click', async () => {
+  if (!state.payload) return;
+  gsmBtn.disabled = true;
+  const origLabel = gsmBtn.textContent;
+  gsmBtn.textContent = 'Loading ffmpeg...';
+  gsmStatus.textContent = '';
+
+  try {
+    await ensureFfmpeg((msg) => { gsmStatus.textContent += msg + '\n'; gsmStatus.scrollTop = gsmStatus.scrollHeight; });
+    gsmBtn.textContent = 'Decoding...';
+
+    const fftSize = parseInt(document.getElementById('fftSize').value) || 32768;
+    const { samples, sampleRate, spec } = await runFfmpegGsm(state.payload, state.sampleRate, fftSize);
+
+    // Replace any previous GSM candidate (in case of re-run) then add fresh.
+    state.candidates = state.candidates.filter(c => !c.name.startsWith('GSM 06.10'));
+    state.candidates.push({ name: 'GSM 06.10 (ffmpeg, real decoder)', samples, sampleRate, spec });
+    renderCandidates();
+
+    gsmStatus.textContent += `\nDone: ${samples.length} samples @ ${sampleRate}Hz, score ${spec.score.toFixed(1)}\n`;
+    gsmBtn.textContent = 'Re-decode as GSM 06.10';
+    gsmBtn.disabled = false;
+  } catch (err) {
+    gsmStatus.textContent += `\nFailed: ${explainFfmpegError(err)}\n`;
+    gsmBtn.textContent = origLabel;
+    gsmBtn.disabled = false;
+  }
+});
+
+
+// ---- Header alignment scanner ----
+// GSM frames are 33 bytes and stateful (each frame's decode depends on the
+// previous frame's filter state), so starting even one byte into the wrong
+// position corrupts every frame from then on — producing exactly a "mostly
+// noise, occasionally speech-like" result. This tries a spread of candidate
+// header sizes through the real decoder and scores each one, so the correct
+// boundary can be picked by evidence instead of guesswork.
+gsmScanBtn.addEventListener('click', async () => {
+  if (!state.file) return;
+  gsmScanBtn.disabled = true;
+  gsmBtn.disabled = true;
+  const origLabel = gsmScanBtn.textContent;
+  gsmScanResults.innerHTML = '';
+  gsmStatus.textContent = '';
+
+  try {
+    await ensureFfmpeg((msg) => { gsmStatus.textContent += msg + '\n'; });
+
+    const fullBytes = new Uint8Array(await state.file.arrayBuffer());
+    const currentHeaderSize = Math.max(0, parseInt(document.getElementById('headerSize').value) || 0);
+    const fftSize = parseInt(document.getElementById('fftSize').value) || 32768;
+
+    // Candidate offsets: a spread around the current guess, plus round
+    // numbers and 33-byte (one GSM frame) multiples, since off-by-one-frame
+    // header misreads are a common cause of this exact symptom.
+    const offsets = new Set();
+    for (let d = -8; d <= 40; d++) { const v = currentHeaderSize + d; if (v >= 0) offsets.add(v); }
+    [0, 4, 8, 16, 20, 24, 28, 32, 33, 36, 44, 48, 66, 100].forEach(v => offsets.add(v));
+    const offsetList = Array.from(offsets).sort((a, b) => a - b).filter(o => o < fullBytes.length - 66);
+
+    const results = [];
+    for (let i = 0; i < offsetList.length; i++) {
+      const offset = offsetList[i];
+      gsmScanBtn.textContent = `Scanning... (${i + 1}/${offsetList.length}, offset ${offset})`;
+      try {
+        const payload = fullBytes.slice(offset);
+        const { samples, sampleRate, spec } = await runFfmpegGsm(payload, state.sampleRate, fftSize);
+        results.push({ offset, samples, sampleRate, spec });
+      } catch (err) {
+        // A bad offset can legitimately fail to produce a valid GSM stream; skip it.
+      }
+    }
+
+    results.sort((a, b) => b.spec.score - a.spec.score);
+    gsmScanResults.innerHTML = '';
+    results.slice(0, 12).forEach((r, idx) => {
+      const row = document.createElement('div');
+      row.className = 'scan-row' + (idx === 0 ? ' best' : '');
+      row.innerHTML = `
+        <div class="offset">offset 0x${r.offset.toString(16)} (${r.offset})</div>
+        <div class="scan-score">
+          <div class="score-bar"><div class="score-fill" style="width:${r.spec.score.toFixed(0)}%"></div></div>
+          <span>${r.spec.score.toFixed(1)}</span>
+          <button class="scan-apply-btn" data-offset="${r.offset}">Use this offset</button>
+        </div>
+      `;
+      row.querySelector('.scan-apply-btn').addEventListener('click', () => {
+        document.getElementById('headerSize').value = r.offset;
+        state.candidates = state.candidates.filter(c => !c.name.startsWith('GSM 06.10'));
+        state.candidates.push({ name: `GSM 06.10 (ffmpeg, offset ${r.offset})`, samples: r.samples, sampleRate: r.sampleRate, spec: r.spec });
+        renderCandidates();
+      });
+      gsmScanResults.appendChild(row);
+    });
+
+    if (!results.length) {
+      gsmStatus.textContent += '\nNo offset produced a valid GSM decode in the scanned range.\n';
+    } else {
+      gsmStatus.textContent += `\nScanned ${offsetList.length} offsets, best: 0x${results[0].offset.toString(16)} (score ${results[0].spec.score.toFixed(1)})\n`;
+    }
+  } catch (err) {
+    gsmStatus.textContent += `\nScan failed: ${explainFfmpegError(err)}\n`;
+  } finally {
+    gsmScanBtn.textContent = origLabel;
+    gsmScanBtn.disabled = false;
+    gsmBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
